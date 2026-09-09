@@ -57,38 +57,52 @@ instead of erroring out. Simulated values are always flagged with
 `mock: true` in the API response and shown with a small **sim** badge in
 the UI, so you can tell live prices from placeholders at a glance.
 
-### Using a real API key (Alpha Vantage)
+### Using real API keys (Alpha Vantage, Finnhub — with fallback)
 
-To pull quotes from [Alpha Vantage](https://www.alphavantage.co) instead:
+`MARKET_DATA_PROVIDERS` is an ordered, comma-separated list — each provider
+is tried in turn, falling through to the next on failure (rate limit,
+missing data, network error), and only falling back to simulated data if
+every one of them fails. This lets you chain a low-quota provider with a
+higher-quota one as backup, e.g. **Alpha Vantage → Finnhub**:
 
-1. Get a free key: https://www.alphavantage.co/support/#api-key
+1. Get free keys:
+   - Alpha Vantage: https://www.alphavantage.co/support/#api-key
+   - Finnhub: https://finnhub.io/register (no credit card required)
 2. `cp server/.env.example server/.env`
 3. Edit `server/.env`:
    ```
-   MARKET_DATA_PROVIDER=alphavantage
-   ALPHA_VANTAGE_API_KEY=your-key-here
+   MARKET_DATA_PROVIDERS=alphavantage,finnhub
+   ALPHA_VANTAGE_API_KEY=your-alpha-vantage-key
+   FINNHUB_API_KEY=your-finnhub-key
    ```
 4. Restart the server (`npm run dev:server` or `npm run dev`).
 
-`server/.env` is gitignored — your key is never committed. Indices (S&P
-500, Nasdaq, Dow) are mapped to their standard ETF proxies (SPY, QQQ, DIA)
-since Alpha Vantage's free tier doesn't expose raw index tickers.
+`server/.env` is gitignored — your keys are never committed. Indices (S&P
+500, Nasdaq, Dow) are mapped to standard proxies for each provider (ETFs
+SPY/QQQ/DIA for Alpha Vantage; Yahoo-style tickers ^GSPC/^IXIC/^DJI for
+Finnhub) since neither free tier exposes a universal raw index ticker.
 
-**Rate limits matter here.** Alpha Vantage's free tier allows only **25
-requests/day and 5/minute**. This app polls every 20s and requests every
-symbol currently on screen (indices + holdings + watchlist) each time, so
-without caching it would exhaust the daily quota in minutes. To manage
-this, the Alpha Vantage provider caches each symbol's quote/history in
-memory for 5 minutes by default — tune it with `ALPHA_VANTAGE_CACHE_TTL_MS`
-in `server/.env` (e.g. `900000` for 15 minutes). Once the daily quota is
-used up, requests will fail and the app falls back to simulated data (the
-**sim** badge) until the quota resets — that's expected behavior on the
-free tier, not a bug. A paid Alpha Vantage plan removes this ceiling.
+**Rate limits matter here — that's the whole reason for the fallback
+chain.** Alpha Vantage's free tier allows only **25 requests/day and
+5/minute**; this app polls every 20s across every symbol on screen
+(indices + holdings + watchlist), so it exhausts that quota within
+minutes on its own. Its provider module caches responses for 5 minutes by
+default (`ALPHA_VANTAGE_CACHE_TTL_MS`) to soften that, but once the daily
+quota is gone, requests to it fail — and with `finnhub` next in the chain,
+the app keeps pulling live data instead of dropping straight to simulated
+values. Finnhub's free tier (60 requests/minute, cached 30s by default via
+`FINNHUB_CACHE_TTL_MS`) is far more generous, but **does not include free
+historical daily candles** for most symbols — so `fetchHistory` (the
+sparkline charts) will typically still fail over to simulated data on
+Finnhub even when live quotes are working fine. Only when every provider
+in the chain fails does the **sim** badge appear — that's expected
+behavior on free tiers, not a bug.
 
-To wire in a different provider entirely (e.g. Finnhub, IEX Cloud), add a
-module implementing `fetchQuote(symbol)` and `fetchHistory(symbol, days)`
-next to `server/src/services/alphaVantageProvider.js`, then register it in
-the `PROVIDERS` map in `server/src/services/marketData.js`.
+To wire in a different provider entirely (e.g. IEX Cloud, Polygon.io), add
+a module implementing `fetchQuote(symbol)` and `fetchHistory(symbol, days)`
+next to `server/src/services/finnhubProvider.js`, then register it in the
+`PROVIDER_MODULES` map in `server/src/services/marketData.js` and add its
+name to your `MARKET_DATA_PROVIDERS` list.
 
 ## Data persistence
 
@@ -109,6 +123,6 @@ market-tracker/
     ├── .env.example        Provider config template (copy to .env)
     └── src/
         ├── routes/        /api/market, /api/portfolio, /api/watchlist, /api/history
-        ├── services/       Stooq + Alpha Vantage clients, mock-data fallback, unified marketData layer
+        ├── services/       Stooq/Alpha Vantage/Finnhub clients, mock-data fallback, provider-chain marketData layer
         └── data/store.js   JSON-file persistence
 ```
